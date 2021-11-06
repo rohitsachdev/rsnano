@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: UDACITY Nanodegree Project 2 Submission - Rohit Sachdev (Natwest)
+
+Parameters:
+  AMITYPE:
+    Description: AMIID
+    Type: String
+    Default: "ami-083654bd07b5da81d" 
+  EnvironmentName:
+    Description: Prefix String
+    Type: String
+  MinInstance:
+    Description: Minimum number of instances running
+    Type: Number
+    Default: 2
+  MaxInstance:
+    Description: Maximum number of instances running
+    Type: Number
+    Default: 4
+  BHAMIID:
+    Description: Type an existing AMI ID to create EC2 instance within
+    Type: String  
+    Default: "ami-01cc34ab2709337aa"
+  RSKeyName:  
+    Description: KeyName to be used
+    Type: String  
+    Default: "rsucprojkey"
+
+Resources:
+  S3ReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: S3ReadRole
+      Description: S3 Bucket Read Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "S3ReadOnlyAccess"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource: "*"
+
+  S3ReadRoleProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref S3ReadRole
+    
+  WebAppSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to web server 80 port and SSH from locally
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+  
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http both (Egress&Ingress) to load balancer via port 80 only
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  WebAppLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update -y
+          sudo apt-get install unzip awscli -y
+          sudo apt-get install apache2 -y
+          sudo systemctl start apache2.service
+          cd /var/www/html/
+          sudo rm index.html
+          sudo aws s3 cp s3://mybucket-496755823553/UDACITYPROJ1.zip .
+          sudo unzip -o UDACITYPROJ1.zip
+          sudo systemctl restart apache2.service
+      InstanceType: t2.medium
+      ImageId: !Ref AMITYPE
+      SecurityGroups: 
+        - Ref: WebAppSecGroup
+      InstanceType: t2.medium
+      KeyName: !Ref RSKeyName
+      IamInstanceProfile: !Ref S3ReadRoleProfile
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'
+
+  WebAppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PRINETS"
+      LaunchConfigurationName: !Ref WebAppLaunchConfiguration
+      MinSize: !Ref MinInstance
+      MaxSize: !Ref MaxInstance
+      TargetGroupARNs:
+        - Ref: WebAppTargetGroup
+
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUBNET1"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUBNET2"
+      SecurityGroups:
+      - Ref: LBSecGroup
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref WebAppTargetGroup
+      LoadBalancerArn: !Ref WebAppLB
+      Port: '80'
+      Protocol: HTTP
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'WebAppTargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'Listener'
+      Priority: 1
+  
+  RSBH1EC2:
+      Type: AWS::EC2::Instance
+      Properties: 
+        ImageId: !Ref BHAMIID
+        InstanceType: t2.micro
+        KeyName: !Ref RSKeyName
+        NetworkInterfaces: 
+        - AssociatePublicIpAddress: Yes
+          DeviceIndex: 0
+          SubnetId: 
+            Fn::ImportValue: !Sub "${EnvironmentName}-PUBNET1"
+          GroupSet:
+            - Ref: WebAppSecGroup
+
+  RSBH2EC2:
+      Type: AWS::EC2::Instance
+      Properties: 
+        ImageId: !Ref BHAMIID
+        InstanceType: t2.micro
+        KeyName: !Ref RSKeyName
+        NetworkInterfaces: 
+        - AssociatePublicIpAddress: Yes
+          DeviceIndex: 0
+          SubnetId: 
+            Fn::ImportValue: !Sub "${EnvironmentName}-PUBNET2"
+          GroupSet: 
+            - Ref: WebAppSecGroup
+Outputs:
+  wepapp:
+    Description: The App URL
+    Value:
+      Fn::Join:
+        - ''
+        - - "http://"
+          - Fn::GetAtt: WebAppLB.DNSName
+    Export:
+      Name: !Sub "${EnvironmentName}-AppURL"
